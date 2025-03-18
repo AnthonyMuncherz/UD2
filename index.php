@@ -112,17 +112,19 @@ function listFolderContents($path, $conn) {
             $relativePath = str_replace(UPLOAD_DIR, '', $fullPath); // Get path relative to uploads directory
             $output .= "<a href='https://zahar.my/UD2/uploads/" . htmlspecialchars($relativePath, ENT_QUOTES, 'UTF-8') . "' class='btn btn-sm btn-primary' download><i class='fas fa-download'></i></a> ";
             
-            // Add preview buttons based on file type
-            if ($fileInfo) {
-                if (strpos($fileInfo['mime_type'], 'video/') === 0) {
-                    $output .= "<button class='btn btn-sm btn-info preview-btn' data-type='video' data-file='" . htmlspecialchars($fullPath, ENT_QUOTES, 'UTF-8') . "'>";
-                    $output .= "<i class='fas fa-play'></i>";
-                    $output .= "</button>";
-                } elseif (strpos($fileInfo['mime_type'], 'image/') === 0) {
-                    $output .= "<button class='btn btn-sm btn-info preview-btn' data-type='image' data-file='" . htmlspecialchars($fullPath, ENT_QUOTES, 'UTF-8') . "'>";
-                    $output .= "<i class='fas fa-eye'></i>";
-                    $output .= "</button>";
-                }
+            // Add preview buttons based on file extension
+            $fileExt = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+            $imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'];
+            $videoExtensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'wmv', 'flv', 'mkv'];
+            
+            if (in_array($fileExt, $imageExtensions)) {
+                $output .= "<button class='btn btn-sm btn-info preview-btn' data-type='image' data-file='" . htmlspecialchars($fullPath, ENT_QUOTES, 'UTF-8') . "'>";
+                $output .= "<i class='fas fa-eye'></i>";
+                $output .= "</button>";
+            } elseif (in_array($fileExt, $videoExtensions) || ($fileInfo && strpos($fileInfo['mime_type'], 'video/') === 0)) {
+                $output .= "<button class='btn btn-sm btn-info preview-btn' data-type='video' data-file='" . htmlspecialchars($fullPath, ENT_QUOTES, 'UTF-8') . "'>";
+                $output .= "<i class='fas fa-play'></i>";
+                $output .= "</button>";
             }
             
             $output .= "</div>";
@@ -223,6 +225,47 @@ function listFolderContents($path, $conn) {
             max-width: 100%;
             max-height: 80vh;
             object-fit: contain;
+            transition: transform 0.3s ease;
+        }
+        .preview-controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+            background: rgba(0,0,0,0.5);
+            padding: 10px 15px;
+            border-radius: 30px;
+            z-index: 1002;
+        }
+        .preview-controls button {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 20px;
+            cursor: pointer;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: background-color 0.3s ease;
+        }
+        .preview-controls button:hover {
+            background: rgba(255,255,255,0.2);
+        }
+        .image-info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 8px 15px;
+            border-radius: 4px;
+            font-size: 14px;
+            z-index: 1002;
         }
         .notification-warning {
     background-color: #ffc107;
@@ -362,7 +405,15 @@ function listFolderContents($path, $conn) {
     <!-- Preview Overlay -->
     <div class="preview-overlay" id="previewOverlay">
         <div class="close-preview" onclick="closePreview()">&times;</div>
+        <div class="image-info" id="imageInfo"></div>
         <div class="preview-content" id="previewContent"></div>
+        <div class="preview-controls" id="previewControls">
+            <button id="zoomOut" title="Zoom Out"><i class="fas fa-search-minus"></i></button>
+            <button id="zoomReset" title="Reset Zoom"><i class="fas fa-sync-alt"></i></button>
+            <button id="zoomIn" title="Zoom In"><i class="fas fa-search-plus"></i></button>
+            <button id="rotateLeft" title="Rotate Left"><i class="fas fa-undo"></i></button>
+            <button id="rotateRight" title="Rotate Right"><i class="fas fa-redo"></i></button>
+        </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
@@ -370,9 +421,20 @@ function listFolderContents($path, $conn) {
         // Global variable for current XHR request
         let currentXHR = null;
 
+        // Global variables for image preview
+        let currentZoom = 1;
+        let currentRotation = 0;
+        let currentImage = null;
+
         function showPreview(filePath, type) {
             const overlay = document.getElementById('previewOverlay');
             const content = document.getElementById('previewContent');
+            const controls = document.getElementById('previewControls');
+            const imageInfo = document.getElementById('imageInfo');
+            
+            // Reset zoom and rotation
+            currentZoom = 1;
+            currentRotation = 0;
             
             if (type === 'video') {
                 content.innerHTML = `
@@ -381,20 +443,87 @@ function listFolderContents($path, $conn) {
                         Your browser does not support the video tag.
                     </video>
                 `;
+                controls.style.display = 'none';
+                imageInfo.style.display = 'none';
             } else if (type === 'image') {
                 content.innerHTML = `
-                    <img src="${filePath}" style="max-width: 100%; max-height: 80vh; object-fit: contain;" alt="Preview">
+                    <img src="${filePath}" id="previewImage" style="max-width: 100%; max-height: 80vh; object-fit: contain;" alt="Preview">
                 `;
+                controls.style.display = 'flex';
+                
+                // Get image filename
+                const fileName = filePath.split('/').pop();
+                
+                // Create a new image to get dimensions
+                const img = new Image();
+                img.onload = function() {
+                    imageInfo.textContent = `${fileName} (${this.naturalWidth} × ${this.naturalHeight})`;
+                    imageInfo.style.display = 'block';
+                };
+                img.src = filePath;
+                
+                // Set current image for controls
+                currentImage = document.getElementById('previewImage');
             }
             
             overlay.style.display = 'block';
+            
+            // Setup zoom and rotation controls
+            setupImageControls();
         }
 
         function closePreview() {
             const overlay = document.getElementById('previewOverlay');
             const content = document.getElementById('previewContent');
+            const imageInfo = document.getElementById('imageInfo');
+            
             content.innerHTML = '';
+            imageInfo.textContent = '';
             overlay.style.display = 'none';
+            currentImage = null;
+        }
+        
+        function setupImageControls() {
+            // Zoom in
+            document.getElementById('zoomIn').onclick = function() {
+                if (!currentImage) return;
+                currentZoom += 0.25;
+                updateImageTransform();
+            };
+            
+            // Zoom out
+            document.getElementById('zoomOut').onclick = function() {
+                if (!currentImage || currentZoom <= 0.5) return;
+                currentZoom -= 0.25;
+                updateImageTransform();
+            };
+            
+            // Reset zoom
+            document.getElementById('zoomReset').onclick = function() {
+                if (!currentImage) return;
+                currentZoom = 1;
+                currentRotation = 0;
+                updateImageTransform();
+            };
+            
+            // Rotate left
+            document.getElementById('rotateLeft').onclick = function() {
+                if (!currentImage) return;
+                currentRotation -= 90;
+                updateImageTransform();
+            };
+            
+            // Rotate right
+            document.getElementById('rotateRight').onclick = function() {
+                if (!currentImage) return;
+                currentRotation += 90;
+                updateImageTransform();
+            };
+        }
+        
+        function updateImageTransform() {
+            if (!currentImage) return;
+            currentImage.style.transform = `scale(${currentZoom}) rotate(${currentRotation}deg)`;
         }
 
         function showNotification(message, type = 'success') {
